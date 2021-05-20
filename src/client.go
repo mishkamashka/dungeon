@@ -9,4 +9,5 @@ type Client struct {
 	connection   net.Conn
 	name   string
 	writer io.Writer
+	room int
 }
