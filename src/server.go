@@ -6,19 +6,18 @@ import (
 	"log"
 	"net"
 	"regexp"
-	"strconv"
 	"sync"
 )
 
 type Server struct {
 	listener net.Listener
-	rooms    [2][]*Client
+	rooms    [2]*Room
 	mutex    *sync.Mutex
 }
 
 func NewServer() *Server {
 	return &Server{
-		rooms: [2][]*Client{},
+		rooms: [2]*Room{{id: 0, name: "Hall", clients: []*Client{}}, {id: 1, name: "Security", clients: []*Client{}}},
 		mutex: &sync.Mutex{},
 	}
 }
@@ -51,13 +50,29 @@ func (server *Server) Listen(address string) {
 }
 
 func (server *Server) accept(conn net.Conn) *Client {
-	log.Printf("Accepting connection from %v, total clients: %v", conn.RemoteAddr().String(), len(server.rooms[0])+len(server.rooms[1])+1)
+	log.Printf("Accepting connection from %v, total clients: %v", conn.RemoteAddr().String(), len(server.rooms[0].clients)+len(server.rooms[1].clients)+1)
 
 	client := &Client{
 		connection: conn,
 		writer:     io.Writer(conn),
 	}
 
+	client.name = getClientNameAndClearTerminal(client)
+	client.room = 0
+
+	server.mutex.Lock()
+	defer server.mutex.Unlock()
+	server.rooms[client.room].clients = append(server.rooms[client.room].clients, client)
+
+	server.send(client, "welcome to room " + server.rooms[client.room].name)
+	server.send(client, server.rooms[client.room].description)
+	server.broadcastInRoomExceptSender(client.name, client.room, client.name+" has joined")
+	showPrompt(client)
+	return client
+}
+
+func getClientNameAndClearTerminal(client *Client) string {
+	client.writer.Write([]byte("\033[1;1H\033[2J"))
 	_, err := client.writer.Write([]byte("Enter your name:\n"))
 	if err != nil {
 		log.Println(err)
@@ -77,27 +92,16 @@ func (server *Server) accept(conn net.Conn) *Client {
 		}
 	}
 
-	client.name = name
-	client.room = 0
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	server.rooms[client.room] = append(server.rooms[client.room], client)
-
-	client.writer.Write([]byte("\033[1;1H\033[2J"))
-	server.send(client.name, "welcome to room 0")
-	server.broadcastInRoomExceptSender(client.name, client.room, client.name+" has joined")
-	server.showPrompt(client.name)
-	return client
+	return name
 }
 
 func (server *Server) remove(client *Client) {
 	server.mutex.Lock()
 	defer server.mutex.Unlock()
 
-	for i, item := range server.rooms[client.room] {
+	for i, item := range server.rooms[client.room].clients {
 		if item == client {
-			server.rooms[client.room] = append(server.rooms[client.room][:i], server.rooms[client.room][i+1:]...)
+			server.rooms[client.room].clients = append(server.rooms[client.room].clients[:i], server.rooms[client.room].clients[i+1:]...)
 		}
 	}
 
@@ -126,26 +130,17 @@ func (server *Server) serve(client *Client) {
 
 		server.runCommand(message, client)
 
-		server.showPrompt(client.name)
+		showPrompt(client)
 	}
 }
 
 
-func (server *Server) send(name string, message string) {
-	for _, room := range server.rooms {
-		for _, client := range room {
-			if client.name == name {
-				client.writer.Write([]byte("\r" + message + "\n"))
-				break
-			}
-		}
-	}
-	return
+func (server *Server) send(client *Client, message string) {
+	client.writer.Write([]byte("\r" + message + "\n"))
 }
 
 func (server *Server) broadcastInRoom(room int, message string) {
-	for _, client := range server.rooms[room] {
-		// TODO: handle error here?
+	for _, client := range server.rooms[room].clients {
 		client.writer.Write([]byte("\r" + message + "\n> "))
 	}
 	return
@@ -153,7 +148,7 @@ func (server *Server) broadcastInRoom(room int, message string) {
 
 func (server *Server) broadcast(message string) {
 	for _, room := range server.rooms {
-		for _, client := range room {
+		for _, client := range room.clients {
 			client.writer.Write([]byte("\r" + message + "\n> "))
 		}
 	}
@@ -161,8 +156,7 @@ func (server *Server) broadcast(message string) {
 }
 
 func (server *Server) broadcastInRoomExceptSender(name string, room int, message string) {
-	for _, client := range server.rooms[room] {
-		// TODO: handle error here?
+	for _, client := range server.rooms[room].clients {
 		if client.name != name {
 			client.writer.Write([]byte("\r" + message + "\n> "))
 		}
@@ -170,18 +164,8 @@ func (server *Server) broadcastInRoomExceptSender(name string, room int, message
 	return
 }
 
-
-
-func (server *Server) showPrompt(name string) {
-	for _, room := range server.rooms {
-		for _, client := range room {
-			if client.name == name {
-				client.writer.Write([]byte("> "))
-				break
-			}
-		}
-	}
-	return
+func showPrompt(client *Client) {
+	client.writer.Write([]byte("> "))
 }
 
 func (server *Server) runCommand(command string, client *Client) {
@@ -202,7 +186,7 @@ func (server *Server) switchRoom(direction string, client *Client) {
 	} else if direction == "S" && client.room == 1 {
 		newRoom = 0
 	} else {
-		server.send(client.name, "You cannot move there, other room in an another direction")
+		server.send(client, "You cannot move there, other room in an another direction")
 		return
 	}
 
@@ -212,15 +196,16 @@ func (server *Server) switchRoom(direction string, client *Client) {
 
 	server.broadcastInRoomExceptSender(client.name, prevRoom, client.name + " has left the room")
 	server.broadcastInRoomExceptSender(client.name, newRoom, client.name + " has entered the room")
-	server.send(client.name,  "You've entered room " + strconv.Itoa(newRoom))
+	server.send(client,  "You've entered room " + server.rooms[newRoom].name)
+	server.send(client, server.rooms[newRoom].description)
 
 	server.mutex.Lock()
 	defer server.mutex.Unlock()
 
-	for i, item := range server.rooms[prevRoom] {
+	for i, item := range server.rooms[prevRoom].clients {
 		if item == client {
-			server.rooms[prevRoom] = append(server.rooms[prevRoom][:i], server.rooms[prevRoom][i+1:]...)
+			server.rooms[prevRoom].clients = append(server.rooms[prevRoom].clients[:i], server.rooms[prevRoom].clients[i+1:]...)
 		}
 	}
-	server.rooms[newRoom] = append(server.rooms[newRoom], client)
+	server.rooms[newRoom].clients = append(server.rooms[newRoom].clients, client)
 }
