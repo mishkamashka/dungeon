@@ -172,6 +172,8 @@ func (server *Server) runCommand(command string, client *Client) {
 	switch command {
 	case "N", "S":
 		server.switchRoom(command, client)
+	case "observe":
+		server.send(client, server.rooms[client.room].describe())
 	default:
 		if command != "" {
 			server.broadcastInRoomExceptSender(client.name, client.room, client.name+" says: "+command)
